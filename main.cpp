@@ -4,11 +4,13 @@ extern "C" {
 #include "libavformat/avformat.h"
 #include "libavcodec/avcodec.h"
 #include "libswscale/swscale.h"
+#include "libswresample/swresample.h"
 }
 #pragma comment(lib, "avformat.lib")
 #pragma comment(lib, "avutil.lib")
 #pragma comment(lib, "avcodec.lib")
 #pragma comment(lib, "swscale.lib")
+#pragma comment(lib, "swresample.lib")
 
 static double r2d(AVRational r)
 {
@@ -160,6 +162,29 @@ int main(int argc, char** argv) {
 	AVFrame* frame = av_frame_alloc();
 	SwsContext* vctx = nullptr; // 像素格式、尺寸转换上下文
 	unsigned char* rgb = nullptr;
+
+	// 音频重采样上下文
+	SwrContext* actx = swr_alloc();
+	actx = swr_alloc_set_opts(actx,
+		av_get_default_channel_layout(2),
+		AV_SAMPLE_FMT_S16,
+		ac->sample_rate,
+		av_get_default_channel_layout(ac->channels),
+		ac->sample_fmt,
+		ac->sample_rate,
+		0,
+		nullptr);
+	result = swr_init(actx);
+	if (result != 0)
+	{
+		char buf[1024] = { 0 };
+		av_strerror(result, buf, sizeof(buf) - 1);
+		std::cout << "swr_init failed: " << buf << std::endl;
+		getchar();
+		return -1;
+	}
+
+	unsigned char* pcm = nullptr;
 	while (true)
 	{		
 		result = av_read_frame(ic, pkg);
@@ -245,11 +270,25 @@ int main(int argc, char** argv) {
 					std::cout << "高度：" << result << std::endl;
 				}				
 			}
-			//std::cout << "recv frame " << frame->format << " " << frame->linesize[0] << std::endl;
-		}
-		
 
-		
+			if (cc == ac)
+			{
+				if (pcm == nullptr)
+				{
+					pcm = new unsigned char[frame->nb_samples * 2 * 2]; // 样本个数 * 2 样本大小16bit * 2 通道数
+				}
+
+				uint8_t *data[2] = { 0 };
+				data[0] = pcm;
+
+				result = swr_convert(actx,
+					data, frame->nb_samples, // 输出
+					(const uint8_t**)frame->data, frame->nb_samples); // 输入
+				std::cout << "重采样：" << result << std::endl;
+
+			}
+			//std::cout << "recv frame " << frame->format << " " << frame->linesize[0] << std::endl;
+		}		
 	}
 	av_packet_free(&pkg);
 
