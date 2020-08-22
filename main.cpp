@@ -3,10 +3,12 @@
 extern "C" {
 #include "libavformat/avformat.h"
 #include "libavcodec/avcodec.h"
+#include "libswscale/swscale.h"
 }
 #pragma comment(lib, "avformat.lib")
 #pragma comment(lib, "avutil.lib")
 #pragma comment(lib, "avcodec.lib")
+#pragma comment(lib, "swscale.lib")
 
 static double r2d(AVRational r)
 {
@@ -20,6 +22,8 @@ int main(int argc, char** argv) {
 #ifndef _WIN32
 	// 初始化封装库
 	av_register_all();
+	// 注册解码器
+	avcodec_register_all();
 #endif // !_WIN32
 
 	// 初始化网络库
@@ -91,9 +95,71 @@ int main(int argc, char** argv) {
 	// 获取视频流
 	videoIndex = av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
 	audioIndex = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-	ic->streams[videoIndex];
+	
+
+	/////////////////////////////////////视频解码器/////////////////////////////////////
+	// 找到解码器
+	AVCodec* vcodec = avcodec_find_decoder(ic->streams[videoIndex]->codecpar->codec_id);
+	if (vcodec == nullptr)
+	{
+		std::cout << "not find vcodec" << std::endl;
+		return -1;
+	}
+	std::cout << "find vcodec: " << ic->streams[videoIndex]->codecpar->codec_id << std::endl;
+
+	// 创建解码器上下文
+	AVCodecContext* vc = avcodec_alloc_context3(vcodec);
+	
+	// 配置解码器上下文参数
+	avcodec_parameters_to_context(vc, ic->streams[videoIndex]->codecpar);
+	vc->thread_count = 8; // 8线程解码
+
+	// 打开解码器上下文
+	result = avcodec_open2(vc, nullptr, nullptr);
+	if (result != 0)
+	{
+		char buf[1024] = { 0 };
+		av_strerror(result, buf, sizeof(buf) - 1);
+		std::cout << "video avcodec_open2 failed: " << buf << std::endl;
+		getchar();
+		return -1;
+	}
+	std::cout << "video avcodec_open2 success" << std::endl;
+
+	//////////////////////////////////////音频解码器////////////////////////////////////
+	// 找到解码器
+	AVCodec* acodec = avcodec_find_decoder(ic->streams[audioIndex]->codecpar->codec_id);
+	if (acodec == nullptr)
+	{
+		std::cout << "not find acodec" << std::endl;
+		return -1;
+	}
+	std::cout << "find vcodec: " << ic->streams[audioIndex]->codecpar->codec_id << std::endl;
+
+	// 创建解码器上下文
+	AVCodecContext* ac = avcodec_alloc_context3(acodec);
+
+	// 配置解码器上下文参数
+	avcodec_parameters_to_context(ac, ic->streams[audioIndex]->codecpar);
+	ac->thread_count = 8; // 8线程解码
+
+	// 打开解码器上下文
+	result = avcodec_open2(ac, nullptr, nullptr);
+	if (result != 0)
+	{
+		char buf[1024] = { 0 };
+		av_strerror(result, buf, sizeof(buf) - 1);
+		std::cout << "audio avcodec_open2 failed: " << buf << std::endl;
+		getchar();
+		return -1;
+	}
+	std::cout << "audio avcodec_open2 success" << std::endl;
+
 #endif
 	AVPacket* pkg = av_packet_alloc();
+	AVFrame* frame = av_frame_alloc();
+	SwsContext* vctx = nullptr; // 像素格式、尺寸转换上下文
+	unsigned char* rgb = nullptr;
 	while (true)
 	{		
 		result = av_read_frame(ic, pkg);
@@ -105,34 +171,93 @@ int main(int argc, char** argv) {
 			continue;
 		}
 
+		AVCodecContext* cc  = nullptr;
 		if (pkg->stream_index == videoIndex)
 		{
 			std::cout << "视频"<< std::endl;
+			cc = vc;
 		}
 		if (pkg->stream_index == audioIndex)
 		{
 			std::cout << "音频 " << std::endl;
+			cc = ac;
 		}
 		std::cout << "pkt->size: " << pkg->size << std::endl;
 		std::cout << "pkt->pts: " << pkg->pts * r2d(ic->streams[pkg->stream_index]->time_base) * 1000 << std::endl;
 		std::cout << "pkt->dts: " << pkg->dts * r2d(ic->streams[pkg->stream_index]->time_base) * 1000 << std::endl;
+
+		// 解码视频
+		// 发送packet到解码线程,send传nullptr后调用多次avcodec_receive_frame，取出缓冲中数据
+		result = avcodec_send_packet(cc, pkg);				
+		av_packet_unref(pkg);// 释放，引用计数减1, 为0释放空间
+
+		if (result != 0)
+		{
+			char buf[1024] = { 0 };
+			av_strerror(result, buf, sizeof(buf) - 1);
+			std::cout << "avcodec_send_packet failed: " << buf << std::endl;
+			continue;;
+		}
+		while (true)
+		{
+			// 一次send可能对应多个frame
+			result = avcodec_receive_frame(cc, frame);
+			if (result != 0)
+			{
+				break;
+			}
+
+			if (cc == vc)
+			{
+
+				vctx = sws_getCachedContext(
+					vctx, // 传nullptr 会新创建
+					frame->width,
+					frame->height,
+					(AVPixelFormat)frame->format,
+					frame->width,
+					frame->height,
+					AVPixelFormat::AV_PIX_FMT_RGBA,
+					SWS_FAST_BILINEAR, // 尺寸变化算法
+					nullptr,
+					nullptr,
+					nullptr);
+				if (vctx)
+				{
+					//std::cout << "像素转换上下文获取或创建成功" << std::endl;
+					if (rgb == nullptr)
+					{
+						rgb = new unsigned char[frame->width * frame->height * 4];
+					}
+
+					uint8_t *data[2] = { 0 };
+					data[0] = rgb;
+					int lines[2] = { 0 };
+					lines[0] = frame->width * 4;
+					
+					result = sws_scale(vctx,
+						frame->data,
+						frame->linesize,
+						0,
+						frame->height,
+						data,
+						lines);
+					std::cout << "高度：" << result << std::endl;
+				}				
+			}
+			//std::cout << "recv frame " << frame->format << " " << frame->linesize[0] << std::endl;
+		}
 		
 
-		// 释放，引用计数减1, 为0释放空间		
-		av_packet_unref(pkg);
 		
 	}
 	av_packet_free(&pkg);
 
 
-
-
 	if (ic != nullptr)
 	{
 		avformat_close_input(&ic); // 释放封装上下文并置nullptr
-	}
-
-	
+	}	
 	
 	return 0;
 }
