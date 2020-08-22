@@ -2,9 +2,11 @@
 
 extern "C" {
 #include "libavformat/avformat.h"
+#include "libavcodec/avcodec.h"
 }
 #pragma comment(lib, "avformat.lib")
 #pragma comment(lib, "avutil.lib")
+#pragma comment(lib, "avcodec.lib")
 
 static double r2d(AVRational r)
 {
@@ -13,7 +15,7 @@ static double r2d(AVRational r)
 
 int main(int argc, char** argv) {
 	std::cout << "Test Demux ffmpeg" << std::endl;
-	const char* filePath = "test.mkv";
+	const char* filePath = "test.mp4";
 
 #ifndef _WIN32
 	// 初始化封装库
@@ -88,11 +90,39 @@ int main(int argc, char** argv) {
 	int audioIndex = 0;
 	// 获取视频流
 	videoIndex = av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-	audioIndex = av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+	audioIndex = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
 	ic->streams[videoIndex];
+#endif
+	AVPacket* pkg = av_packet_alloc();
+	while (true)
+	{		
+		result = av_read_frame(ic, pkg);
+		if (result != 0)
+		{
+			int ms = 3000;
+			long long pos = (double)ms / (double)1000 / r2d(ic->streams[pkg->stream_index]->time_base);
+			av_seek_frame(ic, videoIndex, pos, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_FRAME);
+			continue;
+		}
 
-#endif	
+		if (pkg->stream_index == videoIndex)
+		{
+			std::cout << "视频"<< std::endl;
+		}
+		if (pkg->stream_index == audioIndex)
+		{
+			std::cout << "音频 " << std::endl;
+		}
+		std::cout << "pkt->size: " << pkg->size << std::endl;
+		std::cout << "pkt->pts: " << pkg->pts * r2d(ic->streams[pkg->stream_index]->time_base) * 1000 << std::endl;
+		std::cout << "pkt->dts: " << pkg->dts * r2d(ic->streams[pkg->stream_index]->time_base) * 1000 << std::endl;
+		
 
+		// 释放，引用计数减1, 为0释放空间		
+		av_packet_unref(pkg);
+		
+	}
+	av_packet_free(&pkg);
 
 
 
